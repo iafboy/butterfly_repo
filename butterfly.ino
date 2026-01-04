@@ -10,10 +10,12 @@
 // ============= 第一部分：核心调试参数 =====================
 // ======================================================
 
-const float STABILIZE_GAIN = 30.0f; 
-const float STICK_SENSITIVITY = 1.0f; 
-const int ROLL_TRIM = 0; 
-const int WING_UP_OFFSET = 600; // 翅膀初始竖起量
+const float ROLL_STAB_GAIN = 30.0f;   // 姿态稳定增益
+const float ROLL_STICK_GAIN = 1.0f;   // 遥控横滚杆灵敏度
+const float ROLL_DIFF_LIMIT = 0.30f;  // 最大±30%扑翼差动补偿
+
+const int ROLL_TRIM = 0;
+const int WING_UP_OFFSET = 600;       // 翅膀初始竖起量
 
 // ======================================================
 // ============= 第二部分：硬件定义与全局变量 =============
@@ -44,7 +46,7 @@ float phase = 0;
 unsigned long last_update, last_imu;
 float angleX = 0, pixel_hue = 0;
 
-// 自定义分段插值函数：根据油门输入 t (0.0-1.0) 返回对应的频率或摆角
+// 自定义分段插值函数
 float multiStageMap(float t, float stages[], float values[], int size) {
   for (int i = 0; i < size - 1; i++) {
     if (t >= stages[i] && t <= stages[i+1]) {
@@ -78,9 +80,9 @@ void setup() {
   strip.setBrightness(100);
   strip.show();
 
-  Wire.end(); 
+  Wire.end();
   delay(100);
-  Wire.begin(I2C_SDA, I2C_SCL, 100000); 
+  Wire.begin(I2C_SDA, I2C_SCL, 100000);
   delay(500);
 
   bool mpu_ok = false;
@@ -103,7 +105,7 @@ void setup() {
   wingL.attach(PIN_SERVO_L, SERVO_MIN, SERVO_MAX);
   wingR.attach(PIN_SERVO_R, SERVO_MIN, SERVO_MAX);
 
-  // 初始：向上竖起
+  // 初始竖起（已修正方向）
   wingL.writeMicroseconds(SERVO_MID + WING_UP_OFFSET);
   wingR.writeMicroseconds(SERVO_MID - WING_UP_OFFSET);
 
@@ -130,7 +132,7 @@ void loop() {
   int thr = crsf.getChannel(3);
   int roll = crsf.getChannel(1);
 
-  // ========== A. 怠速状态：竖起翅膀 ==========
+  // ====== A. 怠速：翅膀竖起 ======
   if (thr < 1100) {
     wingL.writeMicroseconds(SERVO_MID + WING_UP_OFFSET + ROLL_TRIM);
     wingR.writeMicroseconds(SERVO_MID - WING_UP_OFFSET - ROLL_TRIM);
@@ -139,44 +141,46 @@ void loop() {
     return;
   }
 
-  // ========== B. 扑翼动力学计算 (分段逻辑) ==========
+  // ====== B. 扑翼动力学 ======
   float dt = (now - last_update) * 1e-6;
   if (dt > 0.05) dt = 0.01;
   last_update = now;
 
   float t = constrain((float)(thr - 1100) / 900.0f, 0.0f, 1.0f);
-  
-  // 定义油门关键点 (0, 0.25, 0.5, 0.8, 1.0)
+
   float stages[] = {0.0f, 0.25f, 0.5f, 0.8f, 1.0f};
 
-  // 根据要求定义频率关键点 (滑翔 <3, 起飞 3.5-4, 巡航 4.5-5, 加速 5.5-6)
   float freq_values[] = {1.2f, 2.8f, 4.8f, 5.8f, 9.0f};
   float freq = multiStageMap(t, stages, freq_values, 5);
 
-  // 根据要求定义摆角关键点 (滑翔 >80, 起飞 85-95, 巡航 65-75, 加速 55-60)
   float amp_values[] = {120.0f, 100.0f, 90.0f, 70.0f, 58.0f};
   float total_amp_deg = multiStageMap(t, stages, amp_values, 5);
-
   float amp_us = (total_amp_deg * 0.5f) * (2000.0f / 180.0f);
 
   phase += freq * dt;
   if (phase >= 1.0f) phase -= 1.0f;
 
-  // ========== C. 混合控制与输出 ==========
-  float turn_sum = ((roll - 1500) / 500.0f) * STICK_SENSITIVITY + (angleX / STABILIZE_GAIN);
+  // ====== C. 计算差动补偿 ======
+  float stick_roll = (roll - 1500) / 500.0f;     // -1 ~ +1
+  float diff = stick_roll * ROLL_STICK_GAIN + (angleX / ROLL_STAB_GAIN);
+
+  // 限制在 ±30%
+  diff = constrain(diff, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
+
+  // 翅膀正弦波
   float wave = sinf(phase * 2.0f * PI);
 
-  int pwmL = SERVO_MID + ROLL_TRIM + (int)(wave * amp_us * (1.0f + turn_sum));
-  int pwmR = SERVO_MID - ROLL_TRIM - (int)(wave * amp_us * (1.0f - turn_sum));
+  // ====== D. 输出 ======
+  int pwmL = SERVO_MID + ROLL_TRIM + (int)(wave * amp_us * (1.0f + diff));
+  int pwmR = SERVO_MID - ROLL_TRIM - (int)(wave * amp_us * (1.0f - diff));
 
   wingL.writeMicroseconds(constrain(pwmL, SERVO_MIN, SERVO_MAX));
   wingR.writeMicroseconds(constrain(pwmR, SERVO_MIN, SERVO_MAX));
 
   static unsigned long lp = 0;
   if (millis() - lp > 500) {
-    Serial.printf("Mode: %s | Freq:%.1fHz | Amp:%.1f | Ang:%.1f\n", 
-                  (t<0.25)?"Glide":(t<0.5)?"Takeoff":(t<0.8)?"Cruise":"Accel",
-                  freq, total_amp_deg, angleX);
+    Serial.printf("Freq: %.1f Hz | Amp: %.1f deg | diff=%.2f | roll=%d | angX=%.1f\n",
+                  freq, total_amp_deg, diff, roll, angleX);
     lp = millis();
   }
 }
