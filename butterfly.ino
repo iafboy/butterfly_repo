@@ -104,8 +104,8 @@ void setup() {
   wingR.attach(PIN_SERVO_R, SERVO_MIN, SERVO_MAX);
 
   // 初始：向上竖起
-  wingL.writeMicroseconds(SERVO_MID - WING_UP_OFFSET);
-  wingR.writeMicroseconds(SERVO_MID + WING_UP_OFFSET);
+  wingL.writeMicroseconds(SERVO_MID + WING_UP_OFFSET);
+  wingR.writeMicroseconds(SERVO_MID - WING_UP_OFFSET);
 
   last_update = micros();
   last_imu = micros();
@@ -132,8 +132,8 @@ void loop() {
 
   // ========== A. 怠速状态：竖起翅膀 ==========
   if (thr < 1100) {
-    wingL.writeMicroseconds(SERVO_MID - WING_UP_OFFSET + ROLL_TRIM);
-    wingR.writeMicroseconds(SERVO_MID + WING_UP_OFFSET - ROLL_TRIM);
+    wingL.writeMicroseconds(SERVO_MID + WING_UP_OFFSET + ROLL_TRIM);
+    wingR.writeMicroseconds(SERVO_MID - WING_UP_OFFSET - ROLL_TRIM);
     phase = 0;
     last_update = micros();
     return;
