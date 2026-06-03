@@ -10,12 +10,6 @@
 - WiFi 控制网页
 
 
-
-## 推荐开发顺序
-
-1. 先看 `docs/wiring.md` 完成接线。
-2. 最后烧录 `arduino/dual_servo_wifi_control/dual_servo_wifi_control.ino`，用中文网页控制扑翼。
-
 ## 默认引脚
 
 | 功能 | ESP32-S3 引脚 |
