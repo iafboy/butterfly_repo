@@ -20,10 +20,10 @@
 
 | 功能 | ESP32-S3 引脚 |
 |---|---|
-| MPU6050 SCL | GPIO5 |
-| MPU6050 SDA | GPIO6 |
+| MPU6050 SCL | GPIO9 |
+| MPU6050 SDA | GPIO8 |
 | 左舵机 Signal | GPIO4 |
-| 右舵机 Signal | GPIO7 |
+| 右舵机 Signal | GPIO5 |
 
 如果你的板子没有 GPIO7 可用，可以把代码中的 `RIGHT_SERVO_PIN` 改成 GPIO1 / GPIO2 / GPIO3 / GPIO8 中的空闲脚。
 
