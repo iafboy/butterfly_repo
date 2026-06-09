@@ -23,11 +23,11 @@ const float ROLL_STAB_GAIN   = 22.0f;
 const float ROLL_D_GAIN      = 18.0f;
 const float ROLL_STICK_GAIN  = 1.0f;
 const float ROLL_DIFF_LIMIT  = 0.32f;
-const int   WING_UP_OFFSET   = 620;  // 保留备用，日常悬停展平使用SERVO_MID
+const int   WING_UP_OFFSET    = 620;
 const int   ROLL_TRIM        = 0;
 
 // ==================== 电池参数 ====================
-const float VOLTAGE_DIVIDER = 3.40f;     // 校正过后的分压比（补偿ADC误差）
+const float VOLTAGE_DIVIDER = 3.40f;     // 校正电压分压比
 const float LOW_VOLTAGE      = 3.60f;
 const float CRITICAL_VOLTAGE = 3.45f;
 
@@ -43,9 +43,9 @@ enum FlightMode { MODE_STOP, MODE_TAKEOFF, MODE_CRUISE, MODE_CORRECT, MODE_LAND 
 struct ControlState {
   FlightMode mode = MODE_STOP;
   float flapPhase = 0.0f;
-  float throttle = 0.10f;
+  float throttle = 0.03f; // 默认给中间值
   int   maxAmplitudeDeg = 120;
-  float rightPhaseOffsetDeg = 0.0f; // ★ 修改：改为0度以实现左右翼同步扑动
+  float rightPhaseOffsetDeg = 0.0f; 
   int   steerBias = 0;
   float lastRoll = 0.0f;
   float lastRollError = 0.0f;
@@ -119,8 +119,8 @@ button { font-size:16px; padding:10px 14px; margin:5px; border:0; border-radius:
 <div class="card">
   <label>幅度上限：<span id="ampv">120</span>°</label>
   <input id="amp" type="range" min="60" max="130" value="120" oninput="ampv.innerText=this.value" onchange="apply()">
-  <label>速度：<span id="speedv">0.10</span></label>
-  <input id="speed" type="range" min="0" max="20" value="10" oninput="speedv.innerText=(this.value/100).toFixed(2)" onchange="apply()">
+  <label>速度：<span id="speedv">0.03</span></label>
+  <input id="speed" type="range" min="0" max="6" value="3" oninput="speedv.innerText=(this.value/100).toFixed(2)" onchange="apply()">
   <label>相位差：<span id="phasev">0</span>°</label>
   <input id="phase" type="range" min="0" max="180" value="0" oninput="phasev.innerText=this.value" onchange="apply()">
 </div>
@@ -175,13 +175,14 @@ String modeName(FlightMode m) {
     case MODE_LAND: return "LAND"; default: return "UNKNOWN"; }
 }
 
+// ★ 修改：各飞行模式下的油门默认值按 0~0.06 的比例重新估算分配
 void applyModeDefaults() {
   switch(state.mode) {
     case MODE_STOP:    state.throttle = 0.00f; state.maxAmplitudeDeg = 120; break;
-    case MODE_TAKEOFF: state.throttle = 0.16f; state.maxAmplitudeDeg = 125; break;
-    case MODE_CRUISE:  state.throttle = 0.10f; state.maxAmplitudeDeg = 105; break;
-    case MODE_CORRECT: state.throttle = 0.11f; state.maxAmplitudeDeg = 100; break;
-    case MODE_LAND:    state.throttle = 0.05f; state.maxAmplitudeDeg = 75;  break;
+    case MODE_TAKEOFF: state.throttle = 0.05f; state.maxAmplitudeDeg = 125; break;
+    case MODE_CRUISE:  state.throttle = 0.03f; state.maxAmplitudeDeg = 105; break;
+    case MODE_CORRECT: state.throttle = 0.03f; state.maxAmplitudeDeg = 100; break;
+    case MODE_LAND:    state.throttle = 0.01f; state.maxAmplitudeDeg = 75;  break;
   }
 }
 
@@ -220,10 +221,9 @@ void controlTask(void *pv) {
     if(dt <= 0 || dt > 0.1f) dt = 0.01f;
 
     float effectiveThrottle = state.throttle;
-    if(critical) effectiveThrottle = min(effectiveThrottle, 0.04f);
-    else if(state.lowVoltageWarning) effectiveThrottle = min(effectiveThrottle, 0.08f);
+    if(critical) effectiveThrottle = min(effectiveThrottle, 0.02f);
+    else if(state.lowVoltageWarning) effectiveThrottle = min(effectiveThrottle, 0.04f);
 
-    // ★ 修改：未启动或停止状态下，归中展平（输出SERVO_MID）
     if(!state.running || state.mode == MODE_STOP || effectiveThrottle < 0.001f) {
       writeServos(SERVO_MID, SERVO_MID); 
       state.flapPhase = 0;
@@ -231,7 +231,8 @@ void controlTask(void *pv) {
       continue;
     }
 
-    float t = constrain(effectiveThrottle / 0.20f, 0.0f, 1.0f);
+    // ★ 修改：基准归一化分母从 0.20f 改为 0.06f 对应全油门区间
+    float t = constrain(effectiveThrottle / 0.06f, 0.0f, 1.0f);
     float freq = multiStageMap(t, stages, freqs, 5);
     float ampDeg = min(multiStageMap(t, stages, amps, 5), (float)state.maxAmplitudeDeg);
     float ampUs = (ampDeg * 0.5f) * (2000.0f / 180.0f);
@@ -302,8 +303,9 @@ void setupServer() {
 
   server.on("/set", [](){
     if(server.hasArg("amp")) state.maxAmplitudeDeg = constrain(server.arg("amp").toInt(), 60, 130);
-    if(server.hasArg("speed")) state.throttle = constrain(server.arg("speed").toFloat(), 0.0f, 0.20f);
-    if(server.hasArg("phase")) state.rightPhaseOffsetDeg = constrain(server.arg("phase").toFloat(), 0.0f, 180.0f); // ★ 放宽滑动条范围
+    // ★ 修改：油门设置上限约束收窄至 0.06f
+    if(server.hasArg("speed")) state.throttle = constrain(server.arg("speed").toFloat(), 0.0f, 0.06f);
+    if(server.hasArg("phase")) state.rightPhaseOffsetDeg = constrain(server.arg("phase").toFloat(), 0.0f, 180.0f);
     server.send(200, "ok");
   });
 
@@ -318,8 +320,9 @@ void setupServer() {
     if(a=="left") state.steerBias = constrain(state.steerBias-5, -15, 15);
     else if(a=="right") state.steerBias = constrain(state.steerBias+5, -15, 15);
     else if(a=="center") state.steerBias = 0;
-    else if(a=="faster") { state.throttle = constrain(state.throttle+0.02f,0,0.20f); state.running=true; }
-    else if(a=="slower") state.throttle = constrain(state.throttle-0.02f,0,0.20f);
+    // ★ 修改：细微加减速的步长改为 0.01f，上限锁定为 0.06f
+    else if(a=="faster") { state.throttle = constrain(state.throttle+0.01f, 0.0f, 0.06f); state.running=true; }
+    else if(a=="slower") state.throttle = constrain(state.throttle-0.01f, 0.0f, 0.06f);
     server.send(200, "ok");
   });
 
@@ -342,7 +345,6 @@ void setup() {
   leftServo.attach(LEFT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
   rightServo.attach(RIGHT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
 
-  // 上电后立即回中展平
   writeServos(SERVO_MID, SERVO_MID);
 
   WiFi.mode(WIFI_AP);
