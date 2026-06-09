@@ -175,7 +175,6 @@ String modeName(FlightMode m) {
     case MODE_LAND: return "LAND"; default: return "UNKNOWN"; }
 }
 
-// ★ 修改：各飞行模式下的油门默认值按 0~0.06 的比例重新估算分配
 void applyModeDefaults() {
   switch(state.mode) {
     case MODE_STOP:    state.throttle = 0.00f; state.maxAmplitudeDeg = 120; break;
@@ -231,7 +230,6 @@ void controlTask(void *pv) {
       continue;
     }
 
-    // ★ 修改：基准归一化分母从 0.20f 改为 0.06f 对应全油门区间
     float t = constrain(effectiveThrottle / 0.06f, 0.0f, 1.0f);
     float freq = multiStageMap(t, stages, freqs, 5);
     float ampDeg = min(multiStageMap(t, stages, amps, 5), (float)state.maxAmplitudeDeg);
@@ -255,12 +253,15 @@ void controlTask(void *pv) {
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
-    int pwmR = SERVO_MID - ROLL_TRIM + (int)(waveR * ampUs * (1.0f - diff));
+    
+    // ★ 修改：右侧波形计算改为减法，解决左右镜像导致的翅膀反向扑动问题
+    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff));
 
     writeServos(pwmL, pwmR);
     state.lastRoll = roll;
 
-    vTaskDelay(8);
+    // ★ 修改：增大系统延时，减轻由于网络协议栈抢占 CPU 引起的舵机抖动
+    vTaskDelay(12); 
   }
 }
 
@@ -303,7 +304,6 @@ void setupServer() {
 
   server.on("/set", [](){
     if(server.hasArg("amp")) state.maxAmplitudeDeg = constrain(server.arg("amp").toInt(), 60, 130);
-    // ★ 修改：油门设置上限约束收窄至 0.06f
     if(server.hasArg("speed")) state.throttle = constrain(server.arg("speed").toFloat(), 0.0f, 0.06f);
     if(server.hasArg("phase")) state.rightPhaseOffsetDeg = constrain(server.arg("phase").toFloat(), 0.0f, 180.0f);
     server.send(200, "ok");
@@ -320,7 +320,6 @@ void setupServer() {
     if(a=="left") state.steerBias = constrain(state.steerBias-5, -15, 15);
     else if(a=="right") state.steerBias = constrain(state.steerBias+5, -15, 15);
     else if(a=="center") state.steerBias = 0;
-    // ★ 修改：细微加减速的步长改为 0.01f，上限锁定为 0.06f
     else if(a=="faster") { state.throttle = constrain(state.throttle+0.01f, 0.0f, 0.06f); state.running=true; }
     else if(a=="slower") state.throttle = constrain(state.throttle-0.01f, 0.0f, 0.06f);
     server.send(200, "ok");
