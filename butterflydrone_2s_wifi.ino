@@ -6,28 +6,28 @@
 #include <ArduinoJson.h>
 
 // ==================== 引脚配置（适配 S3 Super Mini） ====================
-#define SDA_PIN           8      // I2C SDA
-#define SCL_PIN           9      // I2C SCL
-#define LEFT_SERVO_PIN    4
-#define RIGHT_SERVO_PIN   5
-#define BATTERY_PIN       1      // ADC 电压检测（GPIO1）
+#define SDA_PIN            8      // I2C SDA
+#define SCL_PIN            9      // I2C SCL
+#define LEFT_SERVO_PIN     4
+#define RIGHT_SERVO_PIN    5
+#define BATTERY_PIN        1      // ADC 电压检测（GPIO1）
 
 // ==================== 舵机参数 ====================
-#define SERVO_MID         1520
-#define SERVO_MIN         500
-#define SERVO_MAX         2500
-#define SERVO_HZ          50
+#define SERVO_MID          1520
+#define SERVO_MIN          500
+#define SERVO_MAX          2500
+#define SERVO_HZ           50
 
 // ==================== 控制参数 ====================
 const float ROLL_STAB_GAIN   = 22.0f;
 const float ROLL_D_GAIN      = 18.0f;
 const float ROLL_STICK_GAIN  = 1.0f;
 const float ROLL_DIFF_LIMIT  = 0.32f;
-const int   WING_UP_OFFSET   = 620;
+const int   WING_UP_OFFSET   = 620;  // 保留备用，日常悬停展平使用SERVO_MID
 const int   ROLL_TRIM        = 0;
 
 // ==================== 电池参数 ====================
-const float VOLTAGE_DIVIDER = 3.13f;     // R1=10k, R2=4.7k, R1 接电池正极, R2 接 GND, 中间点接 GPIO1
+const float VOLTAGE_DIVIDER = 3.40f;     // 校正过后的分压比（补偿ADC误差）
 const float LOW_VOLTAGE      = 3.60f;
 const float CRITICAL_VOLTAGE = 3.45f;
 
@@ -45,7 +45,7 @@ struct ControlState {
   float flapPhase = 0.0f;
   float throttle = 0.10f;
   int   maxAmplitudeDeg = 120;
-  float rightPhaseOffsetDeg = 180.0f;
+  float rightPhaseOffsetDeg = 0.0f; // ★ 修改：改为0度以实现左右翼同步扑动
   int   steerBias = 0;
   float lastRoll = 0.0f;
   float lastRollError = 0.0f;
@@ -92,9 +92,9 @@ button { font-size:16px; padding:10px 14px; margin:5px; border:0; border-radius:
 <h2>扑翼蝴蝶 WiFi 控制台 (S3 Super Mini)</h2>
 <div class="card">
   <p>当前模式：<span id="mode" class="value">-</span></p>
-  <p>俯仰：<span id="pitch" class="value">-</span>°　横滚：<span id="roll" class="value">-</span>°</p>
-  <p>左PWM：<span id="left" class="value">-</span>　右PWM：<span id="right" class="value">-</span></p>
-  <p>速度：<span id="throttle" class="value">-</span>　转向：<span id="steer" class="value">-</span></p>
+  <p>俯仰：<span id="pitch" class="value">-</span>° 横滚：<span id="roll" class="value">-</span>°</p>
+  <p>左PWM：<span id="left" class="value">-</span> 右PWM：<span id="right" class="value">-</span></p>
+  <p>速度：<span id="throttle" class="value">-</span> 转向：<span id="steer" class="value">-</span></p>
   <p>电池电压：<span id="voltage" class="value">-</span>V <span id="vstatus"></span></p>
 </div>
 
@@ -121,8 +121,8 @@ button { font-size:16px; padding:10px 14px; margin:5px; border:0; border-radius:
   <input id="amp" type="range" min="60" max="130" value="120" oninput="ampv.innerText=this.value" onchange="apply()">
   <label>速度：<span id="speedv">0.10</span></label>
   <input id="speed" type="range" min="0" max="20" value="10" oninput="speedv.innerText=(this.value/100).toFixed(2)" onchange="apply()">
-  <label>相位差：<span id="phasev">180</span>°</label>
-  <input id="phase" type="range" min="90" max="210" value="180" oninput="phasev.innerText=this.value" onchange="apply()">
+  <label>相位差：<span id="phasev">0</span>°</label>
+  <input id="phase" type="range" min="0" max="180" value="0" oninput="phasev.innerText=this.value" onchange="apply()">
 </div>
 
 <script>
@@ -223,8 +223,9 @@ void controlTask(void *pv) {
     if(critical) effectiveThrottle = min(effectiveThrottle, 0.04f);
     else if(state.lowVoltageWarning) effectiveThrottle = min(effectiveThrottle, 0.08f);
 
+    // ★ 修改：未启动或停止状态下，归中展平（输出SERVO_MID）
     if(!state.running || state.mode == MODE_STOP || effectiveThrottle < 0.001f) {
-      writeServos(SERVO_MID + WING_UP_OFFSET, SERVO_MID - WING_UP_OFFSET);
+      writeServos(SERVO_MID, SERVO_MID); 
       state.flapPhase = 0;
       vTaskDelay(20);
       continue;
@@ -302,7 +303,7 @@ void setupServer() {
   server.on("/set", [](){
     if(server.hasArg("amp")) state.maxAmplitudeDeg = constrain(server.arg("amp").toInt(), 60, 130);
     if(server.hasArg("speed")) state.throttle = constrain(server.arg("speed").toFloat(), 0.0f, 0.20f);
-    if(server.hasArg("phase")) state.rightPhaseOffsetDeg = constrain(server.arg("phase").toFloat(), 90.0f, 210.0f);
+    if(server.hasArg("phase")) state.rightPhaseOffsetDeg = constrain(server.arg("phase").toFloat(), 0.0f, 180.0f); // ★ 放宽滑动条范围
     server.send(200, "ok");
   });
 
@@ -341,7 +342,8 @@ void setup() {
   leftServo.attach(LEFT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
   rightServo.attach(RIGHT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
 
-  writeServos(SERVO_MID + WING_UP_OFFSET, SERVO_MID - WING_UP_OFFSET);
+  // 上电后立即回中展平
+  writeServos(SERVO_MID, SERVO_MID);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
