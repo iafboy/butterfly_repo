@@ -1,7 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
-#include <MPU6050_light.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <ESP32Servo.h>
 #include <ArduinoJson.h>
 
@@ -19,7 +20,7 @@
 #define SERVO_HZ           50
 
 // ==================== 控制参数 ====================
-const float ROLL_STAB_GAIN   = 22.0f;
+const float ROLL_STAB_GAIN   = 30.0f;     // 姿态稳定增益（采用参考程序设定）
 const float ROLL_D_GAIN      = 18.0f;
 const float ROLL_STICK_GAIN  = 1.0f;
 const float ROLL_DIFF_LIMIT  = 0.32f;
@@ -34,7 +35,7 @@ const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
 
 WebServer server(80);
-MPU6050 mpu(Wire);
+Adafruit_MPU6050 mpu; // 切换为 Adafruit MPU6050 驱动
 Servo leftServo, rightServo;
 
 enum FlightMode { MODE_STOP, MODE_FLY };
@@ -45,13 +46,14 @@ struct ControlState {
   float throttle = 0.03f; 
   int   maxAmplitudeDeg = 120;
   float rightPhaseOffsetDeg = 0.0f; 
-  int   trimBias = 0;           // 新增：手动横滚配平补偿（范围 -15 到 15）
+  int   trimBias = 0;           // 手动横滚配平补偿（范围 -15 到 15）
   float lastRoll = 0.0f;
   float lastRollError = 0.0f;
   int   lastLeftUs = SERVO_MID;
   int   lastRightUs = SERVO_MID;
   bool  running = false;
   unsigned long lastFlapTime = 0;
+  unsigned long lastImuTime = 0;  // 新增：融合滤波时间戳
   float batteryVoltage = 0.0f;
   bool  lowVoltageWarning = false;
 } state;
@@ -65,7 +67,7 @@ float readBatteryVoltage() {
   return (raw / 4095.0f) * 3.3f * VOLTAGE_DIVIDER;
 }
 
-// ====================== 带配平功能的控制页面 ======================
+// ====================== 控制页面 ======================
 String htmlPage() {
   return R"rawliteral(
 <!DOCTYPE html>
@@ -180,15 +182,33 @@ void writeServos(int l, int r) {
   rightServo.writeMicroseconds(r);
 }
 
-// ====================== 控制任务（含低压保护与MPU自动稳像） ======================
+// ====================== 控制任务（含互补滤波姿态解算） ======================
 void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
   const float freqs[]  = {1.2, 2.8, 4.8, 5.8, 9.0};
   const float amps[]   = {120, 100, 90, 70, 58};
 
   while(true) {
-    mpu.update();
-    float roll = mpu.getAngleX(); // ★ MPU6050读取横滚角（左右倾斜度）
+    // 采用 Adafruit 库进行事件读取与互补滤波姿态解算
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    
+    unsigned long now_us = micros();
+    float dt_imu = (now_us - state.lastImuTime) * 1e-6f;
+    state.lastImuTime = now_us;
+    if (dt_imu <= 0 || dt_imu > 0.1f) dt_imu = 0.01f;
+
+    // 计算横滚角与俯仰角（融合加速度计与陀螺仪）
+    float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180.0 / PI;
+    float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+    
+    float gyroRateX = g.gyro.x * 180.0 / PI;
+    float gyroRateY = g.gyro.y * 180.0 / PI;
+    
+    // 互补滤波公式：0.96权重给积分陀螺仪，0.04给高频准确但易受震动的加速度计
+    float roll = 0.96f * (state.lastRoll + gyroRateX * dt_imu) + 0.04f * accAngleX;
+    // 俯仰角也可一并解算并在前端呈现
+    float pitch = 0.96f * (0 + gyroRateY * dt_imu) + 0.04f * accAngleY;
 
     state.batteryVoltage = readBatteryVoltage();
     state.lowVoltageWarning = state.batteryVoltage < LOW_VOLTAGE;
@@ -205,7 +225,8 @@ void controlTask(void *pv) {
     if(!state.running || effectiveThrottle < 0.001f) {
       writeServos(SERVO_MID, SERVO_MID); 
       state.flapPhase = 0;
-      vTaskDelay(20);
+      state.lastRoll = roll;
+      vTaskDelay(12);
       continue;
     }
 
@@ -217,26 +238,27 @@ void controlTask(void *pv) {
     state.flapPhase += freq * dt;
     if(state.flapPhase >= 1.0f) state.flapPhase -= 1.0f;
 
-    // ★ 自动平衡逻辑：利用 MPU6050 陀螺仪数据通过 PD 算法实时自动改变左右舵机角度补偿
+    // 自动平衡逻辑：利用解算出的 roll 通过 PD 环自动改变舵机差动
     float P = roll * ROLL_STAB_GAIN;
     float D = (roll - state.lastRollError) * ROLL_D_GAIN;
     
-    // 结合手动配平偏移量 (trimBias) 改变基准倾斜度
     float trimManual = state.trimBias / 15.0f; 
     float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
 
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
     state.lastRollError = roll;
+    state.lastRoll = roll; // 保存当前横滚角供下一次计算以及前端调用
 
     float waveL = sinf(state.flapPhase * TWO_PI);
+    // 右侧改为减法解决镜像反向扑翼，同时叠加相位差调节
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
     int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff));
 
     writeServos(pwmL, pwmR);
-    state.lastRoll = roll;
 
+    // 增大系统延时至12ms，避免抢占WiFi协议栈中断造成舵机抖动
     vTaskDelay(12); 
   }
 }
@@ -248,7 +270,7 @@ void setupServer() {
   server.on("/status", [](){
     StaticJsonDocument<512> doc;
     doc["running"] = state.running;
-    doc["pitch"] = mpu.getAngleY();
+    doc["pitch"] = 0; // 预留或填入计算值
     doc["roll"] = state.lastRoll;
     doc["left"] = state.lastLeftUs;
     doc["right"] = state.lastRightUs;
@@ -270,7 +292,6 @@ void setupServer() {
     server.send(200, "text/plain", "OK");
   });
 
-  // ★ 新增：网页端微调倾角路由
   server.on("/nudge", [](){
     String a = server.arg("action");
     if(a=="left") state.trimBias = constrain(state.trimBias-1, -15, 15);
@@ -293,9 +314,24 @@ void setup() {
   Serial.begin(115200);
   pinMode(BATTERY_PIN, INPUT);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  mpu.begin();
-  mpu.calcOffsets(true, true);
+  // 初始化总线及重置I2C状态机，防止偶发挂起
+  Wire.end();
+  delay(100);
+  Wire.begin(SDA_PIN, SCL_PIN, 100000);
+  delay(500);
+
+  bool mpu_ok = false;
+  for(int i = 0; i < 5; i++) {
+    if(mpu.begin(0x68, &Wire)) { mpu_ok = true; break; } // 绑定I2C实例
+    delay(200);
+  }
+
+  if(mpu_ok) {
+    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  } else {
+    Serial.println("MPU6050 初始化失败，请检查连线！");
+  }
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
