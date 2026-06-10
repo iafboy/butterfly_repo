@@ -45,6 +45,7 @@ struct ControlState {
   float throttle = 0.03f; 
   int   maxAmplitudeDeg = 120;
   float rightPhaseOffsetDeg = 0.0f; 
+  int   trimBias = 0;           // 新增：手动横滚配平补偿（范围 -15 到 15）
   float lastRoll = 0.0f;
   float lastRollError = 0.0f;
   int   lastLeftUs = SERVO_MID;
@@ -64,7 +65,7 @@ float readBatteryVoltage() {
   return (raw / 4095.0f) * 3.3f * VOLTAGE_DIVIDER;
 }
 
-// ====================== 精简版控制页面 ======================
+// ====================== 带配平功能的控制页面 ======================
 String htmlPage() {
   return R"rawliteral(
 <!DOCTYPE html>
@@ -76,9 +77,10 @@ String htmlPage() {
 <style>
 body { font-family: Arial, "Microsoft YaHei", sans-serif; margin:18px; background:#101418; color:#f2f2f2; }
 .card { background:#1c232b; padding:16px; margin:12px 0; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,.25); }
-button { font-size:18px; font-weight:bold; padding:12px 24px; margin:6px; border:0; border-radius:8px; cursor:pointer; }
-.on { background:#37c871; color:#07140b; }
-.off { background:#ff6767; color:#210303; }
+button { font-size:16px; padding:10px 16px; margin:5px; border:0; border-radius:8px; cursor:pointer; }
+.on { background:#37c871; color:#07140b; font-weight:bold; }
+.off { background:#ff6767; color:#210303; font-weight:bold; }
+.btn-trim { background:#5596ff; color:white; }
 .value { color:#78dce8; font-weight:bold; }
 .warning { color:#ffaa00; animation: blink 1s infinite; }
 .critical { color:#ff4444; animation: blink 0.6s infinite; }
@@ -93,13 +95,20 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
   <p>运行状态：<span id="mode" class="value">-</span></p>
   <p>俯仰角：<span id="pitch" class="value">-</span>° 横滚角：<span id="roll" class="value">-</span>°</p>
   <p>左翼PWM：<span id="left" class="value">-</span> 右翼PWM：<span id="right" class="value">-</span></p>
-  <p>当前速度：<span id="throttle" class="value">-</span></p>
+  <p>当前速度：<span id="throttle" class="value">-</span> 横滚配平：<span id="trim" class="value">0</span></p>
   <p>电池电压：<span id="voltage" class="value">-</span>V <span id="vstatus"></span></p>
 </div>
 
 <div class="card" style="text-align:center;">
   <button class="on" onclick="cmd('/start')">启 动</button>
   <button class="off" onclick="cmd('/stop')">停 止</button>
+</div>
+
+<div class="card">
+  <h3>● 姿态手动机械配平 (微调左右倾)</h3>
+  <button class="btn-trim" onclick="nudge('left')">◀ 微调左倾</button>
+  <button class="btn-trim" onclick="nudge('right')">微调右倾 ▶</button>
+  <button class="btn-trim" onclick="nudge('center')">配平回中</button>
 </div>
 
 <div class="card">
@@ -116,6 +125,7 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
 
 <script>
 function cmd(path){ fetch(path).then(update); }
+function nudge(a){ fetch('/nudge?action='+a).then(update); }
 function apply(){
   fetch('/set?amp='+document.getElementById('amp').value+
         '&speed='+(document.getElementById('speed').value/100).toFixed(2)).then(update);
@@ -128,6 +138,7 @@ function update(){
     document.getElementById('left').innerText = s.left;
     document.getElementById('right').innerText = s.right;
     document.getElementById('throttle').innerText = s.throttle.toFixed(2);
+    document.getElementById('trim').innerText = s.trim;
 
     let v = s.voltage.toFixed(2);
     let vspan = document.getElementById('voltage');
@@ -169,7 +180,7 @@ void writeServos(int l, int r) {
   rightServo.writeMicroseconds(r);
 }
 
-// ====================== 控制任务（含低压保护） ======================
+// ====================== 控制任务（含低压保护与MPU自动稳像） ======================
 void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
   const float freqs[]  = {1.2, 2.8, 4.8, 5.8, 9.0};
@@ -177,7 +188,7 @@ void controlTask(void *pv) {
 
   while(true) {
     mpu.update();
-    float roll = mpu.getAngleX();
+    float roll = mpu.getAngleX(); // ★ MPU6050读取横滚角（左右倾斜度）
 
     state.batteryVoltage = readBatteryVoltage();
     state.lowVoltageWarning = state.batteryVoltage < LOW_VOLTAGE;
@@ -206,9 +217,13 @@ void controlTask(void *pv) {
     state.flapPhase += freq * dt;
     if(state.flapPhase >= 1.0f) state.flapPhase -= 1.0f;
 
+    // ★ 自动平衡逻辑：利用 MPU6050 陀螺仪数据通过 PD 算法实时自动改变左右舵机角度补偿
     float P = roll * ROLL_STAB_GAIN;
     float D = (roll - state.lastRollError) * ROLL_D_GAIN;
-    float total = (P + D) / 100.0f;
+    
+    // 结合手动配平偏移量 (trimBias) 改变基准倾斜度
+    float trimManual = state.trimBias / 15.0f; 
+    float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
 
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
     state.lastRollError = roll;
@@ -238,6 +253,7 @@ void setupServer() {
     doc["left"] = state.lastLeftUs;
     doc["right"] = state.lastRightUs;
     doc["throttle"] = state.throttle;
+    doc["trim"] = state.trimBias;
     doc["voltage"] = state.batteryVoltage;
     doc["lowWarning"] = state.lowVoltageWarning;
     doc["critical"] = (state.batteryVoltage < CRITICAL_VOLTAGE);
@@ -252,6 +268,15 @@ void setupServer() {
     if(server.hasArg("amp")) state.maxAmplitudeDeg = constrain(server.arg("amp").toInt(), 60, 130);
     if(server.hasArg("speed")) state.throttle = constrain(server.arg("speed").toFloat(), 0.0f, 0.06f);
     server.send(200, "text/plain", "OK");
+  });
+
+  // ★ 新增：网页端微调倾角路由
+  server.on("/nudge", [](){
+    String a = server.arg("action");
+    if(a=="left") state.trimBias = constrain(state.trimBias-1, -15, 15);
+    else if(a=="right") state.trimBias = constrain(state.trimBias+1, -15, 15);
+    else if(a=="center") state.trimBias = 0;
+    server.send(200,"text/plain", "OK");
   });
 
   server.on("/reverse", [](){
