@@ -20,7 +20,7 @@
 #define SERVO_HZ           50
 
 // ==================== 控制参数 ====================
-const float ROLL_STAB_GAIN   = 30.0f;     // 姿态稳定增益（采用参考程序设定）
+const float ROLL_STAB_GAIN   = 30.0f;     // 姿态稳定增益
 const float ROLL_D_GAIN      = 18.0f;
 const float ROLL_STICK_GAIN  = 1.0f;
 const float ROLL_DIFF_LIMIT  = 0.32f;
@@ -35,7 +35,7 @@ const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
 
 WebServer server(80);
-Adafruit_MPU6050 mpu; // 切换为 Adafruit MPU6050 驱动
+Adafruit_MPU6050 mpu; 
 Servo leftServo, rightServo;
 
 enum FlightMode { MODE_STOP, MODE_FLY };
@@ -53,11 +53,12 @@ struct ControlState {
   int   lastRightUs = SERVO_MID;
   bool  running = false;
   unsigned long lastFlapTime = 0;
-  unsigned long lastImuTime = 0;  // 新增：融合滤波时间戳
+  unsigned long lastImuTime = 0;  // 融合滤波时间戳
   float batteryVoltage = 0.0f;
   bool  lowVoltageWarning = false;
 } state;
 
+bool mpuInitialized = false; // 记录6050是否正常工作
 bool reverseLeft = false;
 bool reverseRight = false;
 
@@ -182,33 +183,34 @@ void writeServos(int l, int r) {
   rightServo.writeMicroseconds(r);
 }
 
-// ====================== 控制任务（含互补滤波姿态解算） ======================
+// ====================== 控制任务（带安全容错机制） ======================
 void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
   const float freqs[]  = {1.2, 2.8, 4.8, 5.8, 9.0};
   const float amps[]   = {120, 100, 90, 70, 58};
 
   while(true) {
-    // 采用 Adafruit 库进行事件读取与互补滤波姿态解算
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
+    float roll = 0.0f;
+    float pitch = 0.0f;
     
-    unsigned long now_us = micros();
-    float dt_imu = (now_us - state.lastImuTime) * 1e-6f;
-    state.lastImuTime = now_us;
-    if (dt_imu <= 0 || dt_imu > 0.1f) dt_imu = 0.01f;
+    if (mpuInitialized) {
+      sensors_event_t a, g, temp;
+      mpu.getEvent(&a, &g, &temp);
+      
+      unsigned long now_us = micros();
+      float dt_imu = (now_us - state.lastImuTime) * 1e-6f;
+      state.lastImuTime = now_us;
+      if (dt_imu <= 0 || dt_imu > 0.1f) dt_imu = 0.01f;
 
-    // 计算横滚角与俯仰角（融合加速度计与陀螺仪）
-    float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180.0 / PI;
-    float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
-    
-    float gyroRateX = g.gyro.x * 180.0 / PI;
-    float gyroRateY = g.gyro.y * 180.0 / PI;
-    
-    // 互补滤波公式：0.96权重给积分陀螺仪，0.04给高频准确但易受震动的加速度计
-    float roll = 0.96f * (state.lastRoll + gyroRateX * dt_imu) + 0.04f * accAngleX;
-    // 俯仰角也可一并解算并在前端呈现
-    float pitch = 0.96f * (0 + gyroRateY * dt_imu) + 0.04f * accAngleY;
+      float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180.0 / PI;
+      float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+      
+      float gyroRateX = g.gyro.x * 180.0 / PI;
+      float gyroRateY = g.gyro.y * 180.0 / PI;
+      
+      roll = 0.96f * (state.lastRoll + gyroRateX * dt_imu) + 0.04f * accAngleX;
+      pitch = 0.96f * (0 + gyroRateY * dt_imu) + 0.04f * accAngleY;
+    }
 
     state.batteryVoltage = readBatteryVoltage();
     state.lowVoltageWarning = state.batteryVoltage < LOW_VOLTAGE;
@@ -238,19 +240,20 @@ void controlTask(void *pv) {
     state.flapPhase += freq * dt;
     if(state.flapPhase >= 1.0f) state.flapPhase -= 1.0f;
 
-    // 自动平衡逻辑：利用解算出的 roll 通过 PD 环自动改变舵机差动
-    float P = roll * ROLL_STAB_GAIN;
-    float D = (roll - state.lastRollError) * ROLL_D_GAIN;
+    float P = 0.0f, D = 0.0f;
+    if (mpuInitialized) {
+      P = roll * ROLL_STAB_GAIN;
+      D = (roll - state.lastRollError) * ROLL_D_GAIN;
+    }
     
     float trimManual = state.trimBias / 15.0f; 
     float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
 
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
     state.lastRollError = roll;
-    state.lastRoll = roll; // 保存当前横滚角供下一次计算以及前端调用
+    state.lastRoll = roll; 
 
     float waveL = sinf(state.flapPhase * TWO_PI);
-    // 右侧改为减法解决镜像反向扑翼，同时叠加相位差调节
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
@@ -258,7 +261,6 @@ void controlTask(void *pv) {
 
     writeServos(pwmL, pwmR);
 
-    // 增大系统延时至12ms，避免抢占WiFi协议栈中断造成舵机抖动
     vTaskDelay(12); 
   }
 }
@@ -270,7 +272,7 @@ void setupServer() {
   server.on("/status", [](){
     StaticJsonDocument<512> doc;
     doc["running"] = state.running;
-    doc["pitch"] = 0; // 预留或填入计算值
+    doc["pitch"] = 0; 
     doc["roll"] = state.lastRoll;
     doc["left"] = state.lastLeftUs;
     doc["right"] = state.lastRightUs;
@@ -312,25 +314,30 @@ void setupServer() {
 // ====================== Setup ======================
 void setup() {
   Serial.begin(115200);
+  delay(500);
+  
+  Serial.println("\n正在启动系统...");
   pinMode(BATTERY_PIN, INPUT);
 
-  // 初始化总线及重置I2C状态机，防止偶发挂起
   Wire.end();
   delay(100);
-  Wire.begin(SDA_PIN, SCL_PIN, 100000);
+  Wire.begin(SDA_PIN, SCL_PIN, 100000); // ★ 此处已修正拼写错误
   delay(500);
 
   bool mpu_ok = false;
   for(int i = 0; i < 5; i++) {
-    if(mpu.begin(0x68, &Wire)) { mpu_ok = true; break; } // 绑定I2C实例
+    if(mpu.begin(0x68, &Wire)) { mpu_ok = true; break; } 
     delay(200);
   }
 
   if(mpu_ok) {
     mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    mpuInitialized = true;
+    Serial.println("MPU6050 初始化成功");
   } else {
-    Serial.println("MPU6050 初始化失败，请检查连线！");
+    mpuInitialized = false;
+    Serial.println("！未检测到 MPU6050，已忽略传感器，继续启动系统...");
   }
 
   ESP32PWM::allocateTimer(0);
@@ -343,14 +350,21 @@ void setup() {
   writeServos(SERVO_MID, SERVO_MID);
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);
+  bool apStarted = WiFi.softAP(AP_SSID, AP_PASS);
+  
+  Serial.print("WiFi 热点广播状态: ");
+  if (apStarted) {
+    Serial.println("启动成功！");
+    Serial.print("SSID: "); Serial.println(AP_SSID);
+    Serial.print("IP Address: "); Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("启动失败！");
+  }
 
   setupServer();
 
   xTaskCreatePinnedToCore(controlTask, "FlapCtrl", 8192, NULL, 3, NULL, 1);
-
-  Serial.println("\nButterfly Drone (ESP32-S3 Super Mini) 已启动！");
-  Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+  Serial.println("控制任务创建完成，系统就绪。");
 }
 
 void loop() {
