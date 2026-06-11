@@ -3,7 +3,6 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <ESP32Servo.h>
 #include <ArduinoJson.h>
 
 // ==================== 引脚配置（适配 S3 Super Mini） ====================
@@ -36,7 +35,6 @@ const char* AP_PASS = "12345678";
 
 WebServer server(80);
 Adafruit_MPU6050 mpu; 
-Servo leftServo, rightServo;
 
 enum FlightMode { MODE_STOP, MODE_FLY };
 
@@ -173,14 +171,20 @@ float multiStageMap(float t, const float s[], const float v[], int n) {
   return v[n-1];
 }
 
+// ★ 兼容新版 ESP32 Core 3.x 及以上版本的舵机直接输出函数
 void writeServos(int l, int r) {
   l = constrain(l, SERVO_MIN, SERVO_MAX);
   r = constrain(r, SERVO_MIN, SERVO_MAX);
   if(reverseLeft) l = SERVO_MIN + SERVO_MAX - l;
   if(reverseRight) r = SERVO_MIN + SERVO_MAX - r;
   state.lastLeftUs = l; state.lastRightUs = r;
-  leftServo.writeMicroseconds(l);
-  rightServo.writeMicroseconds(r);
+  
+  // 计算占空比：频率 50Hz (周期 20000us)，16位精度最大值 65535
+  uint32_t dutyL = (uint32_t)((l / 20000.0f) * 65535.0f);
+  uint32_t dutyR = (uint32_t)((r / 20000.0f) * 65535.0f);
+
+  ledcWrite(LEFT_SERVO_PIN, dutyL);
+  ledcWrite(RIGHT_SERVO_PIN, dutyR);
 }
 
 // ====================== 控制任务（带安全容错机制） ======================
@@ -321,7 +325,7 @@ void setup() {
 
   Wire.end();
   delay(100);
-  Wire.begin(SDA_PIN, SCL_PIN, 100000); // ★ 此处已修正拼写错误
+  Wire.begin(SDA_PIN, SCL_PIN, 100000); 
   delay(500);
 
   bool mpu_ok = false;
@@ -340,12 +344,9 @@ void setup() {
     Serial.println("！未检测到 MPU6050，已忽略传感器，继续启动系统...");
   }
 
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  leftServo.setPeriodHertz(SERVO_HZ);
-  rightServo.setPeriodHertz(SERVO_HZ);
-  leftServo.attach(LEFT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
-  rightServo.attach(RIGHT_SERVO_PIN, SERVO_MIN, SERVO_MAX);
+  // ★ 修复拼写：使用正确的 ledcAttach 绑定舵机引脚至 LEDC 输出（50Hz 频率，16位精度）
+  ledcAttach(LEFT_SERVO_PIN, 50, 16);
+  ledcAttach(RIGHT_SERVO_PIN, 50, 16);
 
   writeServos(SERVO_MID, SERVO_MID);
 
