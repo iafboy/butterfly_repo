@@ -1,19 +1,18 @@
-# Butterfly WIFI Drone 
+# Butterfly WIFI Drone
 
 本方案基于：
 
-- ESP32-S3 Super Mini
-- MPU6050 姿态传感器
-- 2S 电池
-- ARMJSHU_AJ33 降压模块，输出 5V
-- 双舵机扑翼机构
-- WiFi 控制网页
-
+* ESP32-S3 Super Mini
+* MPU6050 姿态传感器
+* 2S 电池
+* ARMJSHU_AJ33 降压模块，输出 5V
+* 双舵机扑翼机构
+* WiFi 控制网页
 
 ## 默认引脚
 
 | 功能 | ESP32-S3 引脚 |
-|---|---|
+| --- | --- |
 | MPU6050 SCL | GPIO9 |
 | MPU6050 SDA | GPIO8 |
 | 左舵机 Signal | GPIO4 |
@@ -21,69 +20,99 @@
 
 如果你的板子没有 GPIO7 可用，可以把代码中的 `RIGHT_SERVO_PIN` 改成 GPIO1 / GPIO2 / GPIO3 / GPIO8 中的空闲脚。
 
+## MPU6050 模块与 I2C 上拉电阻说明
+
+I2C 通信总线（SDA 和 SCL）需要上拉电阻才能保证信号电平稳定。虽然部分 MPU6050 模块板载了上拉电阻，但在实际飞行或长线连接中，若遇到通信失败（如报错 `无法与 MPU6050 通信`），强烈建议在 SDA 和 SCL 引脚与 **3.3V** 之间**各外接一个 4.7kΩ 至 10kΩ 的上拉电阻**。
+
+### MPU6050 接入与上拉电阻接线图
+
+```text
+ESP32-S3 Super Mini               MPU6050 传感器模块
+┌───────────────────┐            ┌─────────────────┐
+│              3.3V ├────────────┤ VCC (模块供电)  │
+│                   │            │                 │
+│                   │   4.7kΩ    │                 │
+│         GPIO8(SDA)├───/\/\/────┼─── SDA          │
+│                   │   4.7kΩ    │                 │
+│         GPIO9(SCL)├───/\/\/────┼─── SCL          │
+│                   │            │                 │
+│               GND ├────────────┤ GND             │
+└───────────────────┘            └─────────────────┘
+                ▲                 ▲
+       (外接上拉电阻至3.3V)
+
+```
+
+*(注意：上拉电阻的另一端必须接 ESP32 的 3.3V，切勿接 5V，以免损坏 ESP32 引脚。)*
+
 ## Arduino 依赖库
 
 在 Arduino IDE 库管理器中安装：
 
-- `MPU6050_light`
-- `ESP32Servo`
+* `MPU6050_light`
+* `ESP32Servo`
 
 WiFi 网页控制版使用 ESP32 Arduino 内置库：
 
-- `WiFi.h`
-- `WebServer.h`
+* `WiFi.h`
+* `WebServer.h`
 
 ## WiFi 中文控制版默认热点
 
 烧录 `dual_servo_wifi_control.ino` 后，ESP32 会创建热点：
 
-- SSID: `ButterflyDrone`
-- Password: `12345678`
+* SSID: `ButterflyDrone`
+* Password: `12345678`
 
 连接后浏览器打开：
 
 ```text
 http://192.168.4.1
+
 ```
 
 可控制：
 
-- 启动 / 停止
-- 模式：STOP / TAKEOFF / CRUISE / CORRECT / LAND
-- 大箭头快速控制：▲ 加速、▼ 减速、◀ 左转、▶ 右转
-- 方向回正
-- 扑翼幅度
-- 扑翼速度
-- 左右相位差
-- 左右舵机是否反向
+* 启动 / 停止
+* 模式：STOP / TAKEOFF / CRUISE / CORRECT / LAND
+* 大箭头快速控制：▲ 加速、▼ 减速、◀ 左转、▶ 右转
+* 方向回正
+* 扑翼幅度
+* 扑翼速度
+* 左右相位差
+* 左右舵机是否反向
 
 ## 重要供电提醒
 
 舵机不要从 ESP32 的 3.3V 取电。建议：
 
-- ARMJSHU_AJ33 5V 输出供 ESP32 VIN/5V
-- ARMJSHU_AJ33 5V 输出同时供舵机 VCC
-- ESP32、MPU6050、舵机、降压模块全部共地
-- 舵机电源端并联 470uF 到 1000uF 电解电容
+* ARMJSHU_AJ33 5V 输出供 ESP32 VIN/5V
+* ARMJSHU_AJ33 5V 输出同时供舵机 VCC
+* ESP32、MPU6050、舵机、降压模块全部共地
+* 舵机电源端并联 470uF 到 1000uF 电解电容
 
 ## 安全调试建议
 
 第一次烧录后不要装翅膀，先让舵机空载动作，确认角度、方向和供电稳定后再装连杆和翅膀。
 
 ## 在 BEC 输出（5V）与 GND 之间 并联：
+
 ```text
 5V (BEC输出) ─────┳──────┳────── 所有舵机 VCC
-                  │      │
-               1000μF   0.1μF
-               电解电容  陶瓷电容
-                  │      │
-                 GND ────┻────── 所有 GND
-                  │
-               TVS二极管 (P6KE6.8A 或 1N4007)
-                  │
-                 GND
+                 │      │
+              1000μF    0.1μF
+             电解电容  陶瓷电容
+                 │      │
+              GND ────┻────── 所有 GND
+                 │
+              TVS二极管 (P6KE6.8A 或 1N4007)
+                 │
+              GND
+
 ```
+
 ## 每个舵机单独防护（推荐）
+
 ```text
 ESP32 GPIO4 ───── 信号线 ───── 舵机信号脚
 5V ───────────────┳────────── 舵机 VCC
@@ -92,13 +121,17 @@ ESP32 GPIO4 ───── 信号线 ───── 舵机信号脚
                   │
                1N4007 二极管（条纹端接5V）
                   │
-                 GND ───────── 舵机 GND
+               GND ───────── 舵机 GND
+
 ```
+
 ## 电池电压分压电路
+
 ```text
 电池正极 (+) ───── R1 (10kΩ 或 15kΩ) ─────┳───── GPIO1 (ADC)
-                                           │
-                                        R2 (4.7kΩ)
-                                           │
-                                         GND
+                                         │
+                                      R2 (4.7kΩ)
+                                         │
+                                        GND
+
 ```
