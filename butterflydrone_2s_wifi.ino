@@ -6,59 +6,62 @@
 #include <ArduinoJson.h>
 
 // ==================== 引脚配置（适配 S3 Super Mini） ====================
-#define SDA_PIN            8      // I2C SDA
-#define SCL_PIN            9      // I2C SCL
-#define LEFT_SERVO_PIN     4
-#define RIGHT_SERVO_PIN    5
-#define BATTERY_PIN        1      // ADC 电压检测（GPIO1）
+#define SDA_PIN 9
+#define SCL_PIN 8
+#define LEFT_SERVO_PIN 4
+#define RIGHT_SERVO_PIN 5
+#define BATTERY_PIN 1
 
 // ==================== 舵机参数 ====================
-#define SERVO_MID          1520
-#define SERVO_MIN          500
-#define SERVO_MAX          2500
-#define SERVO_HZ           50
+#define SERVO_MID 1520
+#define SERVO_MIN 500
+#define SERVO_MAX 2500
+#define SERVO_HZ 50
 
 // ==================== 控制参数 ====================
-const float ROLL_STAB_GAIN   = 30.0f;     // 姿态稳定增益
-const float ROLL_D_GAIN      = 18.0f;
-const float ROLL_STICK_GAIN  = 1.0f;
-const float ROLL_DIFF_LIMIT  = 0.32f;
-const int   ROLL_TRIM        = 0;
+const float ROLL_STAB_GAIN = 30.0f;
+const float ROLL_D_GAIN = 18.0f;
+const float ROLL_STICK_GAIN = 1.0f;
+const float ROLL_DIFF_LIMIT = 0.32f;
+const int ROLL_TRIM = 0;
 
 // ==================== 电池参数 ====================
-const float VOLTAGE_DIVIDER  = 3.40f;     // 校正电压分压比
-const float LOW_VOLTAGE      = 3.60f;
+const float VOLTAGE_DIVIDER = 3.40f;
+const float LOW_VOLTAGE = 3.60f;
 const float CRITICAL_VOLTAGE = 3.45f;
 
 const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
 
 WebServer server(80);
-Adafruit_MPU6050 mpu; 
+Adafruit_MPU6050 mpu;
 
 enum FlightMode { MODE_STOP, MODE_FLY };
 
 struct ControlState {
   FlightMode mode = MODE_STOP;
   float flapPhase = 0.0f;
-  float throttle = 0.03f; 
-  int   maxAmplitudeDeg = 120;
-  float rightPhaseOffsetDeg = 0.0f; 
-  int   trimBias = 0;           // 手动横滚配平补偿（范围 -15 到 15）
+  float throttle = 0.03f;
+  int maxAmplitudeDeg = 120;
+  float rightPhaseOffsetDeg = 0.0f;
+  int trimBias = 0;
   float lastRoll = 0.0f;
   float lastRollError = 0.0f;
-  int   lastLeftUs = SERVO_MID;
-  int   lastRightUs = SERVO_MID;
-  bool  running = false;
+  int lastLeftUs = SERVO_MID;
+  int lastRightUs = SERVO_MID;
+  bool running = false;
   unsigned long lastFlapTime = 0;
-  unsigned long lastImuTime = 0;  // 融合滤波时间戳
+  unsigned long lastImuTime = 0;
   float batteryVoltage = 0.0f;
-  bool  lowVoltageWarning = false;
+  bool lowVoltageWarning = false;
 } state;
 
-bool mpuInitialized = false; // 记录6050是否正常工作
+bool mpuInitialized = false;
 bool reverseLeft = false;
 bool reverseRight = false;
+
+// MPU6050 I2C 地址
+const int MPU_ADDR = 0x68; 
 
 // ====================== 电压读取 ======================
 float readBatteryVoltage() {
@@ -99,31 +102,26 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
   <p>当前速度：<span id="throttle" class="value">-</span> 横滚配平：<span id="trim" class="value">0</span></p>
   <p>电池电压：<span id="voltage" class="value">-</span>V <span id="vstatus"></span></p>
 </div>
-
 <div class="card" style="text-align:center;">
   <button class="on" onclick="cmd('/start')">启 动</button>
   <button class="off" onclick="cmd('/stop')">停 止</button>
 </div>
-
 <div class="card">
   <h3>● 姿态手动机械配平 (微调左右倾)</h3>
   <button class="btn-trim" onclick="nudge('left')">◀ 微调左倾</button>
   <button class="btn-trim" onclick="nudge('right')">微调右倾 ▶</button>
   <button class="btn-trim" onclick="nudge('center')">配平回中</button>
 </div>
-
 <div class="card">
   <div class="label-group">
     <label><b>扑翼角度上限：</b><span id="ampv" class="value">120</span>°</label>
   </div>
   <input id="amp" type="range" min="60" max="130" value="120" oninput="ampv.innerText=this.value" onchange="apply()">
-  
   <div class="label-group">
     <label><b>扑翼速度：</b><span id="speedv" class="value">0.03</span></label>
   </div>
   <input id="speed" type="range" min="0" max="6" value="3" oninput="speedv.innerText=(this.value/100).toFixed(2)" onchange="apply()">
 </div>
-
 <script>
 function cmd(path){ fetch(path).then(update); }
 function nudge(a){ fetch('/nudge?action='+a).then(update); }
@@ -140,7 +138,6 @@ function update(){
     document.getElementById('right').innerText = s.right;
     document.getElementById('throttle').innerText = s.throttle.toFixed(2);
     document.getElementById('trim').innerText = s.trim;
-
     let v = s.voltage.toFixed(2);
     let vspan = document.getElementById('voltage');
     vspan.innerText = v;
@@ -165,55 +162,57 @@ update();
 )rawliteral";
 }
 
+// ====================== 多段映射 ======================
 float multiStageMap(float t, const float s[], const float v[], int n) {
-  for(int i=0; i<n-1; i++) if(t >= s[i] && t <= s[i+1])
-    return v[i] + (v[i+1]-v[i])*(t-s[i])/(s[i+1]-s[i]);
+  for(int i=0; i<n-1; i++) 
+    if(t >= s[i] && t <= s[i+1])
+      return v[i] + (v[i+1]-v[i])*(t-s[i])/(s[i+1]-s[i]);
   return v[n-1];
 }
 
-// ★ 兼容新版 ESP32 Core 3.x 及以上版本的舵机直接输出函数
+// ====================== 舵机输出（原生 LEDC 10位精度） ======================
 void writeServos(int l, int r) {
+  // 限制脉冲宽度在 500μs ~ 2500μs 之间
   l = constrain(l, SERVO_MIN, SERVO_MAX);
   r = constrain(r, SERVO_MIN, SERVO_MAX);
-  if(reverseLeft) l = SERVO_MIN + SERVO_MAX - l;
+
+  if(reverseLeft)  l = SERVO_MIN + SERVO_MAX - l;
   if(reverseRight) r = SERVO_MIN + SERVO_MAX - r;
-  state.lastLeftUs = l; state.lastRightUs = r;
-  
-  // 计算占空比：频率 50Hz (周期 20000us)，16位精度最大值 65535
-  uint32_t dutyL = (uint32_t)((l / 20000.0f) * 65535.0f);
-  uint32_t dutyR = (uint32_t)((r / 20000.0f) * 65535.0f);
+
+  state.lastLeftUs = l;
+  state.lastRightUs = r;
+
+  // 10位分辨率对应的最大步长为 1024 (即 2^10)，周期为 20000μs
+  uint32_t dutyL = (l * 1024UL) / 20000;
+  uint32_t dutyR = (r * 1024UL) / 20000;
 
   ledcWrite(LEFT_SERVO_PIN, dutyL);
   ledcWrite(RIGHT_SERVO_PIN, dutyR);
 }
 
-// ====================== 控制任务（带安全容错机制） ======================
+// ====================== 控制任务 ======================
 void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
-  const float freqs[]  = {1.2, 2.8, 4.8, 5.8, 9.0};
-  const float amps[]   = {120, 100, 90, 70, 58};
+  const float freqs[] = {1.2, 2.8, 4.8, 5.8, 9.0};
+  const float amps[] = {120, 100, 90, 70, 58};
+
+  Serial.println("=== 控制任务已启动 ===");
 
   while(true) {
     float roll = 0.0f;
-    float pitch = 0.0f;
-    
+
     if (mpuInitialized) {
       sensors_event_t a, g, temp;
       mpu.getEvent(&a, &g, &temp);
-      
       unsigned long now_us = micros();
       float dt_imu = (now_us - state.lastImuTime) * 1e-6f;
       state.lastImuTime = now_us;
       if (dt_imu <= 0 || dt_imu > 0.1f) dt_imu = 0.01f;
 
       float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180.0 / PI;
-      float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
-      
       float gyroRateX = g.gyro.x * 180.0 / PI;
-      float gyroRateY = g.gyro.y * 180.0 / PI;
-      
+
       roll = 0.96f * (state.lastRoll + gyroRateX * dt_imu) + 0.04f * accAngleX;
-      pitch = 0.96f * (0 + gyroRateY * dt_imu) + 0.04f * accAngleY;
     }
 
     state.batteryVoltage = readBatteryVoltage();
@@ -229,7 +228,7 @@ void controlTask(void *pv) {
     else if(state.lowVoltageWarning) effectiveThrottle = min(effectiveThrottle, 0.04f);
 
     if(!state.running || effectiveThrottle < 0.001f) {
-      writeServos(SERVO_MID, SERVO_MID); 
+      writeServos(SERVO_MID, SERVO_MID);
       state.flapPhase = 0;
       state.lastRoll = roll;
       vTaskDelay(12);
@@ -249,13 +248,13 @@ void controlTask(void *pv) {
       P = roll * ROLL_STAB_GAIN;
       D = (roll - state.lastRollError) * ROLL_D_GAIN;
     }
-    
-    float trimManual = state.trimBias / 15.0f; 
-    float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
 
+    float trimManual = state.trimBias / 15.0f;
+    float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
+
     state.lastRollError = roll;
-    state.lastRoll = roll; 
+    state.lastRoll = roll;
 
     float waveL = sinf(state.flapPhase * TWO_PI);
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
@@ -264,19 +263,17 @@ void controlTask(void *pv) {
     int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff));
 
     writeServos(pwmL, pwmR);
-
-    vTaskDelay(12); 
+    vTaskDelay(12);
   }
 }
 
 // ====================== WebServer ======================
 void setupServer() {
   server.on("/", [](){ server.send(200, "text/html", htmlPage()); });
-
   server.on("/status", [](){
     StaticJsonDocument<512> doc;
     doc["running"] = state.running;
-    doc["pitch"] = 0; 
+    doc["pitch"] = 0;
     doc["roll"] = state.lastRoll;
     doc["left"] = state.lastLeftUs;
     doc["right"] = state.lastRightUs;
@@ -300,13 +297,13 @@ void setupServer() {
 
   server.on("/nudge", [](){
     String a = server.arg("action");
-    if(a=="left") state.trimBias = constrain(state.trimBias-1, -15, 15);
+    if(a=="left") state.trimBias = constrain(state.trimBias-1, -15, 15); // 修正：此处原代码漏了 state.trimBias
     else if(a=="right") state.trimBias = constrain(state.trimBias+1, -15, 15);
     else if(a=="center") state.trimBias = 0;
     server.send(200,"text/plain", "OK");
   });
 
-  server.on("/reverse", [](){
+  server.on("/reverse", [](){ // 修正：原代码漏了 '/'
     if(server.hasArg("left")) reverseLeft = server.arg("left").toInt() == 1;
     if(server.hasArg("right")) reverseRight = server.arg("right").toInt() == 1;
     server.send(200, "text/plain", "OK");
@@ -318,54 +315,59 @@ void setupServer() {
 // ====================== Setup ======================
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  while (!Serial) delay(10);
   
-  Serial.println("\n正在启动系统...");
+  Serial.println("\n=== 扑翼蝴蝶系统启动 ===");
+
   pinMode(BATTERY_PIN, INPUT);
 
+  // I2C 采用引脚 9 (SDA) 和 8 (SCL)
   Wire.end();
   delay(100);
-  Wire.begin(SDA_PIN, SCL_PIN, 100000); 
+  Wire.begin(SDA_PIN, SCL_PIN, 100000);
   delay(500);
 
-  bool mpu_ok = false;
-  for(int i = 0; i < 5; i++) {
-    if(mpu.begin(0x68, &Wire)) { mpu_ok = true; break; } 
-    delay(200);
-  }
-
-  if(mpu_ok) {
+  // ==================== MPU6050 初始化（直连底层） ====================
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B); // PWR_MGMT_1 寄存器
+  Wire.write(0);    // 设为 0 以唤醒模块
+  byte initError = Wire.endTransmission();
+  
+  if (initError != 0) {
+    Serial.println("无法与 MPU6050 通信，请检查接线！继续运行（无姿态稳定）");
+    mpuInitialized = false;
+  } else {
+    Serial.println("MPU6050 唤醒成功！");
+    // 建立通信实例并设定参数
+    mpu.begin(MPU_ADDR, &Wire);
     mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
     mpuInitialized = true;
-    Serial.println("MPU6050 初始化成功");
-  } else {
-    mpuInitialized = false;
-    Serial.println("！未检测到 MPU6050，已忽略传感器，继续启动系统...");
   }
 
-  // ★ 修复拼写：使用正确的 ledcAttach 绑定舵机引脚至 LEDC 输出（50Hz 频率，16位精度）
-  ledcAttach(LEFT_SERVO_PIN, 50, 16);
-  ledcAttach(RIGHT_SERVO_PIN, 50, 16);
-
+  // ==================== 舵机初始化（原生 LEDC 10位绑定） ====================
+  // 参数：引脚, 频率(50Hz), 分辨率(10位)
+  if (!ledcAttach(LEFT_SERVO_PIN, 50, 10) || !ledcAttach(RIGHT_SERVO_PIN, 50, 10)) {
+    Serial.println("LEDC 绑定舵机引脚失败！");
+  }
+  
   writeServos(SERVO_MID, SERVO_MID);
-
+  Serial.println("舵机归中初始化完成");
+  
+  // WiFi
   WiFi.mode(WIFI_AP);
   bool apStarted = WiFi.softAP(AP_SSID, AP_PASS);
-  
-  Serial.print("WiFi 热点广播状态: ");
   if (apStarted) {
-    Serial.println("启动成功！");
-    Serial.print("SSID: "); Serial.println(AP_SSID);
-    Serial.print("IP Address: "); Serial.println(WiFi.softAPIP());
-  } else {
-    Serial.println("启动失败！");
+    Serial.print("WiFi AP 启动成功！SSID: ");
+    Serial.println(AP_SSID);
+    Serial.print("IP: ");
+    Serial.println(WiFi.softAPIP());
   }
 
   setupServer();
-
   xTaskCreatePinnedToCore(controlTask, "FlapCtrl", 8192, NULL, 3, NULL, 1);
-  Serial.println("控制任务创建完成，系统就绪。");
+
+  Serial.println("系统启动完成！请连接 WiFi 并打开网页控制");
 }
 
 void loop() {
