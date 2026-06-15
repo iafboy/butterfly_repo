@@ -27,8 +27,8 @@ const int ROLL_TRIM = 0;
 
 // ==================== 电池参数 ====================
 const float VOLTAGE_DIVIDER = 3.40f;
-const float LOW_VOLTAGE = 3.30f;
-const float CRITICAL_VOLTAGE = 3.1f;
+const float LOW_VOLTAGE = 3.60f;
+const float CRITICAL_VOLTAGE = 3.45f;
 
 const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
@@ -109,7 +109,7 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
   <p>电池电压：<span id="voltage" class="value">-</span>V <span id="vstatus"></span></p>
 </div>
 <div class="card" style="text-align:center;">
-  <button class="on" onclick="cmd('/start')">启 栋</button>
+  <button class="on" onclick="cmd('/start')">启 动</button>
   <button class="off" onclick="cmd('/stop')">停 止</button>
 </div>
 <div class="card">
@@ -162,7 +162,7 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
 <datalist id="servo-scale">
   <option value="500"></option>
   <option value="1000"></option>
-  <option value="1520" label="中线"></option>
+  <option id="mid-line" value="1520" label="中线"></option>
   <option value="2000"></option>
   <option value="2500"></option>
 </datalist>
@@ -329,8 +329,9 @@ void controlTask(void *pv) {
       D = (roll - state.lastRollError) * ROLL_D_GAIN;
     }
 
+    float pitchCorr = pitch * 12.0f;          // 新增俯仰修正
     float trimManual = state.trimBias / 15.0f;
-    float total = trimManual * ROLL_STICK_GAIN + (P + D) / 100.0f;
+    float total = trimManual * ROLL_STICK_GAIN + (P + D + pitchCorr) / 100.0f;
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
 
     state.lastRollError = roll;
@@ -339,7 +340,7 @@ void controlTask(void *pv) {
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
-    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff));
+    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - vdiff)); // 内部计算修正
 
     // 动态调整叠加初始独立设定值
     pwmL = constrain(pwmL + (state.leftServoUs - SERVO_MID), SERVO_MIN, SERVO_MAX);
