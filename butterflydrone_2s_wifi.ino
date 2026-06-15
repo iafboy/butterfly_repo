@@ -340,7 +340,7 @@ void controlTask(void *pv) {
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
-    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - vdiff)); // 内部计算修正
+    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff)); // 修正为 diff
 
     // 动态调整叠加初始独立设定值
     pwmL = constrain(pwmL + (state.leftServoUs - SERVO_MID), SERVO_MIN, SERVO_MAX);
