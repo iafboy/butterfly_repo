@@ -248,7 +248,7 @@ void writeServos(int l, int r) {
 // ====================== 控制任务 ======================
 void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
-  const float freqs[] = {1.2, 2.8, 4.8, 5.8, 9.0};
+  const float freqs[] = {0.6, 1.2, 2.8, 3.8, 5.0};
   const float amps[] = {120, 100, 90, 70, 58};
   
   state.leftServoUs = 1580;
