@@ -4,6 +4,10 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <ArduinoJson.h>
+#include <math.h>     // sinf, atan2, PI, TWO_PI, radians(), fmax, fmin
+#include <cmath>      // 确保 fmax/fmin 等浮点函数
+// =====================
+#define TWO_PI  (2.0f * PI)
 
 // ==================== 引脚配置（适配 S3 Super Mini） ====================
 #define SDA_PIN 9
@@ -27,8 +31,8 @@ const int ROLL_TRIM = 0;
 
 // ==================== 电池参数 ====================
 const float VOLTAGE_DIVIDER = 3.40f;
-const float LOW_VOLTAGE = 3.60f;
-const float CRITICAL_VOLTAGE = 3.45f;
+const float LOW_VOLTAGE = 3.40f;
+const float CRITICAL_VOLTAGE = 3.20f;
 
 const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
@@ -246,18 +250,15 @@ void controlTask(void *pv) {
   const float stages[] = {0.0, 0.25, 0.5, 0.8, 1.0};
   const float freqs[] = {1.2, 2.8, 4.8, 5.8, 9.0};
   const float amps[] = {120, 100, 90, 70, 58};
-
-  // 初始上电设置应用页面预设值 (1580, 1580 且右侧勾选反向)
+  
   state.leftServoUs = 1580;
   state.rightServoUs = 1580;
   reverseRight = true;
-
   Serial.println("=== 控制任务已启动 ===");
 
   while(true) {
     float roll = 0.0f;
     float pitch = 0.0f;
-
     if (mpuInitialized) {
       sensors_event_t a, g, temp;
       mpu.getEvent(&a, &g, &temp);
@@ -266,23 +267,17 @@ void controlTask(void *pv) {
       state.lastImuTime = now_us;
       if (dt_imu <= 0 || dt_imu > 0.1f) dt_imu = 0.01f;
 
-      // 计算横滚角 Roll (绕 X 轴旋转)
       float accAngleX = atan2(a.acceleration.y, a.acceleration.z) * 180.0 / PI;
       float gyroRateX = g.gyro.x * 180.0 / PI;
       roll = 0.96f * (state.lastRoll + gyroRateX * dt_imu) + 0.04f * accAngleX;
 
-      // 计算俯仰角 Pitch (绕 Y 轴旋转)
       float accAngleY = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
       float gyroRateY = g.gyro.y * 180.0 / PI;
       pitch = 0.96f * (state.lastPitch + gyroRateY * dt_imu) + 0.04f * accAngleY;
-      
-      // 对俯仰角进行取反操作，实现数值反转
-      pitch = -pitch; 
+      pitch = -pitch;
     }
-
     state.lastRoll = roll;
     state.lastPitch = pitch;
-
     state.batteryVoltage = readBatteryVoltage();
     state.lowVoltageWarning = state.batteryVoltage < LOW_VOLTAGE;
     bool critical = state.batteryVoltage < CRITICAL_VOLTAGE;
@@ -292,12 +287,9 @@ void controlTask(void *pv) {
     if(dt <= 0 || dt > 0.1f) dt = 0.01f;
 
     float effectiveThrottle = state.throttle;
-    
-    // 使用 fmin 替代 min 解决浮点数重载二义性报错
     if(critical) effectiveThrottle = fmin(effectiveThrottle, 0.02f);
     else if(state.lowVoltageWarning) effectiveThrottle = fmin(effectiveThrottle, 0.04f);
 
-    // 停止状态下或油门极低时，输出网页端设定的独立初始上翘角度
     if(!state.running || effectiveThrottle < 0.001f) {
       writeServos(state.leftServoUs, state.rightServoUs);
       state.flapPhase = 0;
@@ -307,18 +299,13 @@ void controlTask(void *pv) {
 
     float t = constrain(effectiveThrottle / 0.06f, 0.0f, 1.0f);
     float freq = multiStageMap(t, stages, freqs, 5);
-    
-    // 【强制约束】防止电流突降/欠压抬升升力
-    freq = fmax(freq, 5.5f);
+    freq = fmax(freq, 5.8f);           // 提高最低频率
 
-    // 计算并强制约束最低幅度限制
     float ampDeg = min(multiStageMap(t, stages, amps, 5), (float)state.maxAmplitudeDeg);
-    ampDeg = fmax(ampDeg, 95.0f); 
-    
-    float ampUs = (ampDeg * 0.5f) * (2000.0f / 180.0f);
+    ampDeg = fmax(ampDeg, 100.0f);     // 提高最低幅度
 
-    // 【相位差设定】产生前进力
-    state.rightPhaseOffsetDeg = 18.0f;
+    float ampUs = (ampDeg * 0.5f) * (2000.0f / 180.0f);
+    state.rightPhaseOffsetDeg = 18.0f; // 前进推力
 
     state.flapPhase += freq * dt;
     if(state.flapPhase >= 1.0f) state.flapPhase -= 1.0f;
@@ -328,21 +315,18 @@ void controlTask(void *pv) {
       P = roll * ROLL_STAB_GAIN;
       D = (roll - state.lastRollError) * ROLL_D_GAIN;
     }
-
-    float pitchCorr = pitch * 12.0f;          // 新增俯仰修正
+    float pitchCorr = pitch * 12.0f;
     float trimManual = state.trimBias / 15.0f;
     float total = trimManual * ROLL_STICK_GAIN + (P + D + pitchCorr) / 100.0f;
     float diff = constrain(total, -ROLL_DIFF_LIMIT, ROLL_DIFF_LIMIT);
-
     state.lastRollError = roll;
 
     float waveL = sinf(state.flapPhase * TWO_PI);
     float waveR = sinf(state.flapPhase * TWO_PI + radians(state.rightPhaseOffsetDeg));
 
     int pwmL = SERVO_MID + ROLL_TRIM + (int)(waveL * ampUs * (1.0f + diff));
-    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff)); // 修正为 diff
+    int pwmR = SERVO_MID - ROLL_TRIM - (int)(waveR * ampUs * (1.0f - diff));
 
-    // 动态调整叠加初始独立设定值
     pwmL = constrain(pwmL + (state.leftServoUs - SERVO_MID), SERVO_MIN, SERVO_MAX);
     pwmR = constrain(pwmR + (state.rightServoUs - SERVO_MID), SERVO_MIN, SERVO_MAX);
 
@@ -350,7 +334,6 @@ void controlTask(void *pv) {
     vTaskDelay(12);
   }
 }
-
 // ====================== WebServer ======================
 void setupServer() {
   server.on("/", [](){ server.send(200, "text/html", htmlPage()); });
