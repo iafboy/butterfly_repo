@@ -27,8 +27,8 @@ const int ROLL_TRIM = 0;
 
 // ==================== 电池参数 ====================
 const float VOLTAGE_DIVIDER = 3.40f;
-const float LOW_VOLTAGE = 3.60f;
-const float CRITICAL_VOLTAGE = 3.45f;
+const float LOW_VOLTAGE = 3.30f;
+const float CRITICAL_VOLTAGE = 3.1f;
 
 const char* AP_SSID = "ButterflyDrone";
 const char* AP_PASS = "12345678";
@@ -109,7 +109,7 @@ input[type=range] { width: 100%; margin: 10px 0 20px 0; }
   <p>电池电压：<span id="voltage" class="value">-</span>V <span id="vstatus"></span></p>
 </div>
 <div class="card" style="text-align:center;">
-  <button class="on" onclick="cmd('/start')">启 动</button>
+  <button class="on" onclick="cmd('/start')">启 栋</button>
   <button class="off" onclick="cmd('/stop')">停 止</button>
 </div>
 <div class="card">
@@ -307,8 +307,18 @@ void controlTask(void *pv) {
 
     float t = constrain(effectiveThrottle / 0.06f, 0.0f, 1.0f);
     float freq = multiStageMap(t, stages, freqs, 5);
+    
+    // 【强制约束】防止电流突降/欠压抬升升力
+    freq = fmax(freq, 5.5f);
+
+    // 计算并强制约束最低幅度限制
     float ampDeg = min(multiStageMap(t, stages, amps, 5), (float)state.maxAmplitudeDeg);
+    ampDeg = fmax(ampDeg, 95.0f); 
+    
     float ampUs = (ampDeg * 0.5f) * (2000.0f / 180.0f);
+
+    // 【相位差设定】产生前进力
+    state.rightPhaseOffsetDeg = 18.0f;
 
     state.flapPhase += freq * dt;
     if(state.flapPhase >= 1.0f) state.flapPhase -= 1.0f;
